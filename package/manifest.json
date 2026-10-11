@@ -2,7 +2,7 @@
   "name": "Carturs_Farming",
   "version_number": "1.0.0",
   "website_url": "https://github.com/jekkle/cartur-farming",
-  "description": "Faster crops, bigger harvests, 3x3 planting, growth progress and any-biome farming, all on the Farming skill you already have. Inspired by Smoothbrain's Farming.",
+  "description": "Faster crops and bigger harvests on the Farming skill you already have, plus whole fields in one go with a preview, snapping and replanting. Inspired by Smoothbrain's Farming and PlantEasily.",
   "dependencies": [
     "denikson-BepInExPack_Valheim-5.4.2333"
   ]

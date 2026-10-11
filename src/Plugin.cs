@@ -42,6 +42,12 @@ namespace CarturFarming
         internal static ConfigEntry<bool> EnforceVersion;
         internal static ConfigEntry<KeyboardShortcut> GroupKey;
         internal static ConfigEntry<KeyboardShortcut> SnapKey;
+        internal static ConfigEntry<KeyboardShortcut> ReplantKey;
+        internal static ConfigEntry<KeyboardShortcut> MoreRows, FewerRows, MoreColumns, FewerColumns;
+        internal static ConfigEntry<int> GridRows, GridColumns;
+        internal static ConfigEntry<bool> RandomRotation;
+        internal static ConfigEntry<bool> ReplantOnHarvest;
+        internal static Plugin Instance;
 
         internal const string ServerSection = "1 - Server";
 
@@ -49,6 +55,7 @@ namespace CarturFarming
         {
             Log = Logger;
             Cfg = Config;
+            Instance = this;
 
             GrowthBonus = Config.Bind(ServerSection, "GrowthBonus", 1f,
                 new ConfigDescription("How much faster crops grow at Farming 100, scaled by the planter's level when they planted it. 1 = twice as fast, 0 = vanilla.",
@@ -70,10 +77,24 @@ namespace CarturFarming
                     new AcceptableValueRange<int>(0, 101)));
             EnforceVersion = Config.Bind(ServerSection, "EnforceVersion", true,
                 "On a server: refuse clients running a different version of this mod.");
-            GroupKey = Config.Bind("2 - Keys", "GroupKey", new KeyboardShortcut(KeyCode.LeftShift),
-                "With the cultivator out, toggles planting and harvesting in groups.");
-            SnapKey = Config.Bind("2 - Keys", "SnapKey", new KeyboardShortcut(KeyCode.LeftControl),
+            // Not Shift or Ctrl: in build mode Valheim 1.0 uses Shift for "Toggle snapping / options"
+            // (its own hint bar says so), and Ctrl is crouch. F6/F8/F10 are where PlantEasily put the
+            // same toggles, so its players keep their habits.
+            GroupKey = Config.Bind("2 - Keys", "GroupKey", new KeyboardShortcut(KeyCode.F8),
+                "With the cultivator out, toggles planting fields and harvesting in groups.");
+            SnapKey = Config.Bind("2 - Keys", "SnapKey", new KeyboardShortcut(KeyCode.F10),
                 "With the cultivator out, toggles snapping new crops to the grid of the nearest one.");
+            ReplantKey = Config.Bind("2 - Keys", "ReplantKey", new KeyboardShortcut(KeyCode.F6),
+                "Toggles replanting crops as you harvest them.");
+            MoreRows = Config.Bind("2 - Keys", "MoreRows", new KeyboardShortcut(KeyCode.UpArrow, KeyCode.RightControl), "Cultivator out: one more row in the field.");
+            FewerRows = Config.Bind("2 - Keys", "FewerRows", new KeyboardShortcut(KeyCode.DownArrow, KeyCode.RightControl), "Cultivator out: one row fewer.");
+            MoreColumns = Config.Bind("2 - Keys", "MoreColumns", new KeyboardShortcut(KeyCode.RightArrow, KeyCode.RightControl), "Cultivator out: one more column.");
+            FewerColumns = Config.Bind("2 - Keys", "FewerColumns", new KeyboardShortcut(KeyCode.LeftArrow, KeyCode.RightControl), "Cultivator out: one column fewer.");
+            GridRows = Config.Bind("3 - Field", "Rows", 3, new ConfigDescription("Rows in a planted field (away from you). Changed live with the keys.", new AcceptableValueRange<int>(1, Field.MaxSide)));
+            GridColumns = Config.Bind("3 - Field", "Columns", 3, new ConfigDescription("Columns in a planted field (to your right). Changed live with the keys.", new AcceptableValueRange<int>(1, Field.MaxSide)));
+            RandomRotation = Config.Bind("3 - Field", "RandomRotation", true, "Give each extra crop in a field a random turn, so it doesn't look stamped.");
+            ReplantOnHarvest = Config.Bind("3 - Field", "ReplantOnHarvest", false,
+                "Replant a crop where you harvest it, if you have the seeds. Toggle with ReplantKey.");
 
             try
             {
@@ -121,6 +142,7 @@ namespace CarturFarming
         internal static readonly bool PlantEasily = BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey(PlantEasilyGuid);
 
         internal static bool GroupOn = true;
+        internal static bool IsGroupHarvest => !PlantEasily && GroupOn;
         internal static bool SnapOn;
 
         internal static float Level(Player p) => p != null ? p.GetSkillLevel(Skills.SkillType.Farming) : 0f;
@@ -149,6 +171,26 @@ namespace CarturFarming
             {
                 SnapOn = !SnapOn;
                 p.Message(MessageHud.MessageType.TopLeft, "Crop snapping " + (SnapOn ? "on" : "off"));
+            }
+            if (!PlantEasily && Plugin.ReplantKey.Value.IsDown())
+            {
+                Plugin.ReplantOnHarvest.Value = !Plugin.ReplantOnHarvest.Value;
+                p.Message(MessageHud.MessageType.TopLeft, "Replant on harvest " + (Plugin.ReplantOnHarvest.Value ? "on" : "off"));
+            }
+            if (PlantEasily)
+                return;
+            int rows = Plugin.GridRows.Value, cols = Plugin.GridColumns.Value;
+            if (Plugin.MoreRows.Value.IsDown()) rows++;
+            if (Plugin.FewerRows.Value.IsDown()) rows--;
+            if (Plugin.MoreColumns.Value.IsDown()) cols++;
+            if (Plugin.FewerColumns.Value.IsDown()) cols--;
+            rows = Mathf.Clamp(rows, 1, Field.MaxSide);
+            cols = Mathf.Clamp(cols, 1, Field.MaxSide);
+            if (rows != Plugin.GridRows.Value || cols != Plugin.GridColumns.Value)
+            {
+                Plugin.GridRows.Value = rows;
+                Plugin.GridColumns.Value = cols;
+                p.Message(MessageHud.MessageType.TopLeft, $"Field {cols} x {rows}");
             }
         }
 
@@ -267,11 +309,17 @@ namespace CarturFarming
             __instance.m_maxLevelBonusChance = 2f / Mathf.Max(factor, 0.0001f);   // Random.value < 2 always
         }
 
-        private static void Postfix(Pickable __instance, Humanoid character, bool repeat)
+        private static void Postfix(Pickable __instance, Humanoid character, bool repeat, Saved __state)
         {
-            if (s_inGroup || repeat || !(character is Player p) || p != Player.m_localPlayer ||
-                __instance.m_pickRaiseSkill != Skills.SkillType.Farming || !Farming.GroupOn ||
-                Farming.Level(p) < Plugin.GroupLevel.Value)
+            if (repeat || !(character is Player p) || p != Player.m_localPlayer ||
+                __instance.m_pickRaiseSkill != Skills.SkillType.Farming)
+                return;
+
+            // __state.Set means the prefix saw an unpicked crop, so this call really harvested one.
+            if (__state.Set && Plugin.ReplantOnHarvest.Value && !Farming.PlantEasily)
+                Replant.After(p, __instance);
+
+            if (s_inGroup || !Farming.IsGroupHarvest || Farming.Level(p) < Plugin.GroupLevel.Value)
                 return;
 
             // Same crop, within a few metres - one more row each side of a normally spaced field.
@@ -316,150 +364,4 @@ namespace CarturFarming
         }
     }
 
-    // ---- placement: any biome, snapping, grid ------------------------------------------------
-
-    [HarmonyPatch(typeof(Player), "UpdatePlacementGhost")]
-    internal static class Ghost
-    {
-        private static readonly AccessTools.FieldRef<Player, GameObject> GhostRef =
-            AccessTools.FieldRefAccess<Player, GameObject>("m_placementGhost");
-
-        // Player.UpdatePlacementGhost checks Piece.m_onlyInBiome on the ghost (the instance, not the
-        // prefab), so clearing it on the ghost lets a high-level farmer place it; StampPlanter then
-        // lets the planted crop grow there.
-        private static void Prefix(Player __instance)
-        {
-            GameObject ghost = GhostRef(__instance);
-            if (ghost == null || __instance != Player.m_localPlayer || ghost.GetComponent<Plant>() == null)
-                return;
-            if (Farming.Level(__instance) >= Plugin.AnyBiomeLevel.Value)
-            {
-                Piece piece = ghost.GetComponent<Piece>();
-                if (piece != null) piece.m_onlyInBiome = Heightmap.Biome.None;
-            }
-        }
-
-        // Snap: move the ghost onto the grid of the nearest crop of any kind, at that crop's spacing.
-        private static void Postfix(Player __instance)
-        {
-            GameObject ghost = GhostRef(__instance);
-            if (Farming.PlantEasily || !Farming.SnapOn || ghost == null || !ghost.activeSelf || __instance != Player.m_localPlayer)
-                return;
-            Plant plant = ghost.GetComponent<Plant>();
-            if (plant == null)
-                return;
-
-            float step = Grid.Spacing(plant);
-            Plant nearest = null;
-            float best = step * 1.8f;
-            foreach (Collider c in Physics.OverlapSphere(ghost.transform.position, best))
-            {
-                Plant p = c.GetComponentInParent<Plant>();
-                if (p == null || p.gameObject == ghost) continue;
-                float d = Vector3.Distance(p.transform.position, ghost.transform.position);
-                if (d < best) { best = d; nearest = p; }
-            }
-            if (nearest == null)
-                return;
-
-            Quaternion rot = ghost.transform.rotation;
-            Vector3 local = Quaternion.Inverse(rot) * (ghost.transform.position - nearest.transform.position);
-            Vector3 snapped = nearest.transform.position + rot * new Vector3(Mathf.Round(local.x / step) * step, 0f, Mathf.Round(local.z / step) * step);
-            snapped.y = ZoneSystem.instance.GetGroundHeight(snapped);
-            ghost.transform.position = snapped;
-        }
-    }
-
-    // Group planting: after a crop is placed, fill the other eight cells of a 3x3 grid around it
-    // wherever a crop could legally go. Each one is paid for and placed the way the game places
-    // the first - Player.UpdatePlacement does TryPlacePiece, ConsumeResources, UseStamina,
-    // RaiseSkill - so seeds, stamina and wards all apply per crop.
-    [HarmonyPatch(typeof(Player), nameof(Player.TryPlacePiece))]
-    internal static class Grid
-    {
-        private static readonly AccessTools.FieldRef<Player, GameObject> GhostRef =
-            AccessTools.FieldRefAccess<Player, GameObject>("m_placementGhost");
-        private static readonly AccessTools.FieldRef<Player, bool> NoCost =
-            AccessTools.FieldRefAccess<Player, bool>("m_noPlacementCost");
-        private static readonly Func<Player, float> BuildStamina =
-            AccessTools.MethodDelegate<Func<Player, float>>(AccessTools.Method(typeof(Player), "GetBuildStamina"));
-
-        // Plant.HaveGrowSpace fails on any other healthy plant within m_growRadius of the centre, and
-        // that test hits the neighbour's collider, not its centre, so cells sit a bit further apart.
-        private static readonly int SpaceMask =
-            LayerMask.GetMask("Default", "static_solid", "Default_small", "piece", "piece_nonsolid");   // Plant.HaveGrowSpace
-
-        internal static float Spacing(Plant plant) => plant.m_growRadius * 1.25f + 0.1f;
-
-        private static void Postfix(Player __instance, Piece piece, bool __result)
-        {
-            if (Farming.PlantEasily || !__result || __instance != Player.m_localPlayer || !Farming.GroupOn ||
-                Farming.Level(__instance) < Plugin.GroupLevel.Value)
-                return;
-            Plant plant = piece != null ? piece.GetComponent<Plant>() : null;
-            GameObject ghost = GhostRef(__instance);
-            if (plant == null || ghost == null)
-                return;
-
-            Vector3 centre = ghost.transform.position;
-            Quaternion rot = ghost.transform.rotation;
-            float step = Spacing(plant);
-
-            for (int x = -1; x <= 1; x++)
-                for (int z = -1; z <= 1; z++)
-                {
-                    if (x == 0 && z == 0) continue;
-                    Vector3 pos = centre + rot * new Vector3(x * step, 0f, z * step);
-                    pos.y = ZoneSystem.instance.GetGroundHeight(pos);
-                    if (Blocked(__instance, plant, piece, pos) != null)
-                        continue;
-
-                    bool free = NoCost(__instance) || ZoneSystem.instance.GetGlobalKey(piece.FreeBuildKey());
-                    if (!free && !CanAffordWithCentre(__instance, piece))
-                        return;    // out of seeds - stop here
-                    float stamina = BuildStamina(__instance);
-                    if (!__instance.HaveStamina(stamina))
-                        return;
-
-                    __instance.PlacePiece(piece, pos, rot, doAttack: false);
-                    if (!free)
-                        __instance.ConsumeResources(piece.m_resources, 0);
-                    __instance.UseStamina(stamina);
-                    __instance.RaiseSkill(Skills.SkillType.Farming);
-                }
-        }
-
-        // Player.UpdatePlacement charges for the centre crop only after TryPlacePiece returns, so it is
-        // still owed while these run. Each extra needs its own cost plus the centre's still in the bag,
-        // or 5 seeds would plant 5 extras and the centre for free.
-        private static bool CanAffordWithCentre(Player player, Piece piece)
-        {
-            foreach (Piece.Requirement r in piece.m_resources)
-                if (r.m_resItem != null && r.m_amount > 0 &&
-                    player.GetInventory().CountItems(r.m_resItem.m_itemData.m_shared.m_name) < r.m_amount * 2)
-                    return false;
-            return true;
-        }
-
-        // Why a cell cannot take a crop, or null if it can.
-        private static string Blocked(Player player, Plant plant, Piece piece, Vector3 pos)
-        {
-            Heightmap map = Heightmap.FindHeightmap(pos);
-            if (map == null)
-                return "no heightmap";
-            if (plant.m_needCultivatedGround && !map.IsCultivated(pos))
-                return "not cultivated";
-            if (piece.m_onlyInBiome != Heightmap.Biome.None && (map.GetBiome(pos) & piece.m_onlyInBiome) == 0 &&
-                Farming.Level(player) < Plugin.AnyBiomeLevel.Value)
-                return "biome";
-            if (!PrivateArea.CheckAccess(pos, 0f, false))
-                return "ward";
-            // The game's own room test, Plant.HaveGrowSpace: nothing on these layers inside m_growRadius
-            // except another plant, and here any plant counts since it will grow. A wider sphere wrongly
-            // refused the side cells; checking only plants let a crop go in on top of a branch or rock.
-            foreach (Collider c in Physics.OverlapSphere(pos, plant.m_growRadius, SpaceMask))
-                return "occupied by " + c.transform.root.name;
-            return null;
-        }
-    }
 }
