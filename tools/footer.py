@@ -23,6 +23,11 @@ with urllib.request.urlopen(req, timeout=180) as r:
     packages = json.load(r)
 live = sorted((p for p in packages if p["owner"] == "Cartur" and not p["is_deprecated"] and p["name"] != SELF),
               key=lambda p: p["date_created"])
+# Siblings shipping in the same batch are not in the index yet; CARTUR_ALSO="Carturs_A,Carturs_B"
+# names them so the first of a pair does not ship without a link to the second.
+also = [n.strip() for n in os.environ.get("CARTUR_ALSO", "").split(",") if n.strip()]
+known = {p["name"] for p in live} | {SELF}
+live += [{"name": n} for n in also if n not in known]
 if not live:
     raise SystemExit("no live Cartur packages found - refusing to write an empty footer")
 
