@@ -19,6 +19,10 @@ $plugin = Get-Content (Join-Path $root "src\Plugin.cs") -Raw
 if ($plugin -notmatch 'PluginVersion\s*=\s*"([^"]+)"') { throw "Could not read the plugin version from src\Plugin.cs" }
 if ($Matches[1] -ne $version) { throw "manifest.json is $version but the plugin says $($Matches[1])" }
 
+# Link every published sibling in the README footer - from Thunderstore's live list, not memory.
+python (Join-Path $PSScriptRoot "footer.py")
+if ($LASTEXITCODE -ne 0) { throw "footer.py failed - not packing a README without its links" }
+
 dotnet build (Join-Path $root "src\CarturFarming.csproj") -c Release
 if (-not $?) { throw "build failed" }
 
