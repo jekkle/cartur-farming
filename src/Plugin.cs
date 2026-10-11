@@ -21,6 +21,7 @@ namespace CarturFarming
     /// grid planting are what this adds.
     /// </summary>
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
+    [BepInDependency(Farming.PlantEasilyGuid, BepInDependency.DependencyFlags.SoftDependency)]
     public class Plugin : BaseUnityPlugin
     {
         public const string PluginGuid = "com.jekkle.valheim.carturfarming";
@@ -77,6 +78,8 @@ namespace CarturFarming
             try
             {
                 Harmony.CreateAndPatchAll(typeof(Plugin).Assembly, PluginGuid);
+                if (Farming.PlantEasily)
+                    Log.LogInfo("PlantEasily is installed - it does grid planting and snapping, so ours stand down; group harvest and the rest stay.");
                 Log.LogInfo($"{PluginName} {PluginVersion} loaded - growth, yield, progress, any-biome, grid planting and stamina on the Farming skill.");
             }
             catch (Exception e)
@@ -111,6 +114,12 @@ namespace CarturFarming
         // owns the zone later.
         internal static readonly int PlanterLevelKey = "cartur_farming_level".GetStableHashCode();
 
+        internal const string PlantEasilyGuid = "advize.PlantEasily";
+
+        // PlantEasily (1.2M downloads) already plants in grids and snaps crops. Both at once would
+        // place every crop twice - its grid and ours - so ours stand down when it is loaded.
+        internal static readonly bool PlantEasily = BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey(PlantEasilyGuid);
+
         internal static bool GroupOn = true;
         internal static bool SnapOn;
 
@@ -136,7 +145,7 @@ namespace CarturFarming
                 GroupOn = !GroupOn;
                 p.Message(MessageHud.MessageType.TopLeft, "Group planting and harvesting " + (GroupOn ? "on" : "off"));
             }
-            if (Plugin.SnapKey.Value.IsDown())
+            if (!PlantEasily && Plugin.SnapKey.Value.IsDown())
             {
                 SnapOn = !SnapOn;
                 p.Message(MessageHud.MessageType.TopLeft, "Crop snapping " + (SnapOn ? "on" : "off"));
@@ -334,7 +343,7 @@ namespace CarturFarming
         private static void Postfix(Player __instance)
         {
             GameObject ghost = GhostRef(__instance);
-            if (!Farming.SnapOn || ghost == null || !ghost.activeSelf || __instance != Player.m_localPlayer)
+            if (Farming.PlantEasily || !Farming.SnapOn || ghost == null || !ghost.activeSelf || __instance != Player.m_localPlayer)
                 return;
             Plant plant = ghost.GetComponent<Plant>();
             if (plant == null)
@@ -377,11 +386,14 @@ namespace CarturFarming
 
         // Plant.HaveGrowSpace fails on any other healthy plant within m_growRadius of the centre, and
         // that test hits the neighbour's collider, not its centre, so cells sit a bit further apart.
+        private static readonly int SpaceMask =
+            LayerMask.GetMask("Default", "static_solid", "Default_small", "piece", "piece_nonsolid");   // Plant.HaveGrowSpace
+
         internal static float Spacing(Plant plant) => plant.m_growRadius * 1.25f + 0.1f;
 
         private static void Postfix(Player __instance, Piece piece, bool __result)
         {
-            if (!__result || __instance != Player.m_localPlayer || !Farming.GroupOn ||
+            if (Farming.PlantEasily || !__result || __instance != Player.m_localPlayer || !Farming.GroupOn ||
                 Farming.Level(__instance) < Plugin.GroupLevel.Value)
                 return;
             Plant plant = piece != null ? piece.GetComponent<Plant>() : null;
@@ -392,7 +404,6 @@ namespace CarturFarming
             Vector3 centre = ghost.transform.position;
             Quaternion rot = ghost.transform.rotation;
             float step = Spacing(plant);
-            int placed = 0;
 
             for (int x = -1; x <= 1; x++)
                 for (int z = -1; z <= 1; z++)
@@ -400,11 +411,11 @@ namespace CarturFarming
                     if (x == 0 && z == 0) continue;
                     Vector3 pos = centre + rot * new Vector3(x * step, 0f, z * step);
                     pos.y = ZoneSystem.instance.GetGroundHeight(pos);
-                    if (!CanGo(__instance, plant, piece, pos, step))
+                    if (Blocked(__instance, plant, piece, pos) != null)
                         continue;
 
                     bool free = NoCost(__instance) || ZoneSystem.instance.GetGlobalKey(piece.FreeBuildKey());
-                    if (!free && !__instance.HaveRequirements(piece, Player.RequirementMode.CanBuild))
+                    if (!free && !CanAffordWithCentre(__instance, piece))
                         return;    // out of seeds - stop here
                     float stamina = BuildStamina(__instance);
                     if (!__instance.HaveStamina(stamina))
@@ -415,26 +426,40 @@ namespace CarturFarming
                         __instance.ConsumeResources(piece.m_resources, 0);
                     __instance.UseStamina(stamina);
                     __instance.RaiseSkill(Skills.SkillType.Farming);
-                    placed++;
                 }
         }
 
-        private static bool CanGo(Player player, Plant plant, Piece piece, Vector3 pos, float step)
+        // Player.UpdatePlacement charges for the centre crop only after TryPlacePiece returns, so it is
+        // still owed while these run. Each extra needs its own cost plus the centre's still in the bag,
+        // or 5 seeds would plant 5 extras and the centre for free.
+        private static bool CanAffordWithCentre(Player player, Piece piece)
+        {
+            foreach (Piece.Requirement r in piece.m_resources)
+                if (r.m_resItem != null && r.m_amount > 0 &&
+                    player.GetInventory().CountItems(r.m_resItem.m_itemData.m_shared.m_name) < r.m_amount * 2)
+                    return false;
+            return true;
+        }
+
+        // Why a cell cannot take a crop, or null if it can.
+        private static string Blocked(Player player, Plant plant, Piece piece, Vector3 pos)
         {
             Heightmap map = Heightmap.FindHeightmap(pos);
             if (map == null)
-                return false;
+                return "no heightmap";
             if (plant.m_needCultivatedGround && !map.IsCultivated(pos))
-                return false;
+                return "not cultivated";
             if (piece.m_onlyInBiome != Heightmap.Biome.None && (map.GetBiome(pos) & piece.m_onlyInBiome) == 0 &&
                 Farming.Level(player) < Plugin.AnyBiomeLevel.Value)
-                return false;
+                return "biome";
             if (!PrivateArea.CheckAccess(pos, 0f, false))
-                return false;
-            foreach (Collider c in Physics.OverlapSphere(pos, step * 0.9f))
-                if (c.GetComponentInParent<Plant>() != null || c.GetComponentInParent<Pickable>() != null)
-                    return false;
-            return true;
+                return "ward";
+            // The game's own room test, Plant.HaveGrowSpace: nothing on these layers inside m_growRadius
+            // except another plant, and here any plant counts since it will grow. A wider sphere wrongly
+            // refused the side cells; checking only plants let a crop go in on top of a branch or rock.
+            foreach (Collider c in Physics.OverlapSphere(pos, plant.m_growRadius, SpaceMask))
+                return "occupied by " + c.transform.root.name;
+            return null;
         }
     }
 }
