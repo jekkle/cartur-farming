@@ -44,6 +44,12 @@ run out.
 
 Install it on the server too and its numbers apply to everyone. Key bindings stay your own.
 
+## Compatibility
+
+**PlantEasily** already plants in grids and snaps crops, so when it is installed this mod leaves
+grid planting and snapping to it and keeps everything else (growth, yield, group harvest,
+progress, any biome, stamina).
+
 ## Install
 
 r2modman or Thunderstore Mod Manager, or drop `CarturFarming.dll` into `BepInEx/plugins`.
